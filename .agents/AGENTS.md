@@ -20,3 +20,10 @@ These rules apply to all code generation, refactoring, and additions in the `r-m
 ## 4. File Length Limit (Max 1000 Lines)
 *   **Strict Limit**: No source code file (`.ts`, `.js`, etc.) may exceed **1,000 lines of code**.
 *   **Refactoring Constraint**: If a file grows near or beyond 1,000 lines, it MUST be broken down into smaller sub-modules or utilities (e.g. moving helper functions to a separate file in `utils/`).
+
+## 5. Versioning, Changelog, Commit & Documentation
+*   **Version Updates**: Every time changes are made to the codebase, ensure that the package version in `package.json` is bumped accordingly.
+*   **Changelog Maintenance**: Always document changes, additions, and fixes in `CHANGELOG.md` under the corresponding version entry.
+*   **Committing Changes**: Ensure version updates and changelogs are committed along with the code changes.
+*   **README Documentation**: If a change adds new features, APIs, or updates existing setup/config instructions, update `README.md` accordingly to keep the documentation accurate.
+

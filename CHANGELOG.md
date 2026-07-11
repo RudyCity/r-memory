@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file. The format 
 
 ---
 
+## [1.1.0] - 2026-07-11
+
+### Added
+*   **Model Quantization & Accelerator Options**:
+    *   Added `dtype` ('q8', 'fp16', 'fp32') and `device` ('cpu', 'gpu', 'webgpu') parameters to local embedding providers (`LocalTextEmbeddingProvider` & `LocalCLIPEmbeddingProvider`).
+    *   Allows loading 8-bit quantized ONNX models locally to reduce RAM footprint by up to 75%.
+*   **Hybrid Search (Lexical + Semantic + RRF)**:
+    *   Integrated SQLite FTS5 Full-Text Search inside `SQLiteAdapter` synchronized via database triggers.
+    *   Implemented Reciprocal Rank Fusion (RRF) to merge vector similarity results and keyword match rankings into a single sorted score list.
+*   **Parent-Child Hierarchical RAG**:
+    *   Added support for splitting documents into large Parent chunks (broad context) and small Child chunks (high-precision vector lookup).
+    *   Auto-resolves child memory results to return their parent's content during retrieval, preserving matched snippet details in metadata.
+
 ## [1.0.0] - 2026-07-11
 
 ### Added
