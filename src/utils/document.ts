@@ -76,3 +76,30 @@ export function chunkText(text: string, chunkSize = 500, chunkOverlap = 100): st
 
   return chunks;
 }
+
+export interface ParentChildChunks {
+  parentText: string;
+  childChunks: string[];
+}
+
+/**
+ * Splits text hierarchically into parent chunks and child chunks.
+ * Useful for Parent-Child retrieval.
+ */
+export function chunkTextParentChild(
+  text: string,
+  parentSize = 1000,
+  parentOverlap = 200,
+  childSize = 200,
+  childOverlap = 50
+): ParentChildChunks[] {
+  const parents = chunkText(text, parentSize, parentOverlap);
+  
+  return parents.map(parentText => {
+    const childChunks = chunkText(parentText, childSize, childOverlap);
+    return {
+      parentText,
+      childChunks
+    };
+  });
+}

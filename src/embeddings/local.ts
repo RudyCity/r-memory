@@ -1,4 +1,4 @@
-import { EmbeddingProvider } from '../types.js';
+import { EmbeddingProvider, LocalEmbeddingConfig } from '../types.js';
 
 // Lazy load transformers.js to avoid loading it if only OpenAI-compatible is used
 let transformersModule: any = null;
@@ -14,16 +14,23 @@ async function getTransformers() {
 export class LocalTextEmbeddingProvider implements EmbeddingProvider {
   readonly dimensions = 384;
   private modelName: string;
+  private device: string;
+  private dtype: string;
   private extractor: any = null;
 
-  constructor(modelName = 'Xenova/multilingual-e5-small') {
-    this.modelName = modelName;
+  constructor(config: LocalEmbeddingConfig = {}) {
+    this.modelName = config.modelName || 'Xenova/multilingual-e5-small';
+    this.device = config.device || 'cpu';
+    this.dtype = config.dtype || 'fp32';
   }
 
   private async getExtractor() {
     if (!this.extractor) {
       const { pipeline } = await getTransformers();
-      this.extractor = await pipeline('feature-extraction', this.modelName);
+      this.extractor = await pipeline('feature-extraction', this.modelName, {
+        device: this.device,
+        dtype: this.dtype
+      });
     }
     return this.extractor;
   }
@@ -53,21 +60,28 @@ export class LocalTextEmbeddingProvider implements EmbeddingProvider {
 export class LocalCLIPEmbeddingProvider implements EmbeddingProvider {
   readonly dimensions = 512;
   private modelId: string;
+  private device: string;
+  private dtype: string;
   
   private tokenizer: any = null;
   private textModel: any = null;
   private processor: any = null;
   private visionModel: any = null;
 
-  constructor(modelId = 'Xenova/clip-vit-base-patch32') {
-    this.modelId = modelId;
+  constructor(config: LocalEmbeddingConfig = {}) {
+    this.modelId = config.modelName || 'Xenova/clip-vit-base-patch32';
+    this.device = config.device || 'cpu';
+    this.dtype = config.dtype || 'fp32';
   }
 
   private async initTextModel() {
     if (!this.tokenizer || !this.textModel) {
       const { AutoTokenizer, CLIPTextModelWithProjection } = await getTransformers();
       this.tokenizer = await AutoTokenizer.from_pretrained(this.modelId);
-      this.textModel = await CLIPTextModelWithProjection.from_pretrained(this.modelId);
+      this.textModel = await CLIPTextModelWithProjection.from_pretrained(this.modelId, {
+        device: this.device,
+        dtype: this.dtype
+      });
     }
   }
 
@@ -75,7 +89,10 @@ export class LocalCLIPEmbeddingProvider implements EmbeddingProvider {
     if (!this.processor || !this.visionModel) {
       const { AutoProcessor, CLIPVisionModelWithProjection } = await getTransformers();
       this.processor = await AutoProcessor.from_pretrained(this.modelId);
-      this.visionModel = await CLIPVisionModelWithProjection.from_pretrained(this.modelId);
+      this.visionModel = await CLIPVisionModelWithProjection.from_pretrained(this.modelId, {
+        device: this.device,
+        dtype: this.dtype
+      });
     }
   }
 

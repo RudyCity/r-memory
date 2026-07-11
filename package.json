@@ -9,7 +9,8 @@
     "build": "tsc",
     "test": "vitest run",
     "example": "ts-node --esm examples/test-memory.ts",
-    "example:document": "ts-node --esm examples/test-document.ts"
+    "example:document": "ts-node --esm examples/test-document.ts",
+    "example:advanced": "ts-node --esm examples/test-advanced.ts"
   },
   "keywords": [
     "memory",

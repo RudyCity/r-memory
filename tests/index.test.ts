@@ -163,4 +163,54 @@ describe('RMemory Core Functionality', () => {
     const hasChunkZero = results.some(r => r.memory.metadata._chunkIndex === 0);
     expect(hasChunkZero).toBe(true);
   });
+
+  it('should run hybrid search (FTS5 + Vector + RRF)', async () => {
+    // Add memories with distinct keywords
+    await memory.addMemory({ id: 'doc-hy-1', content: 'Kunci pertama tentang sistem pertahanan.' });
+    await memory.addMemory({ id: 'doc-hy-2', content: 'Makanan kesukaan kucing adalah ikan segar.' });
+
+    // Run hybrid search
+    const results = await memory.query({
+      query: 'sistem pertahanan',
+      hybrid: true,
+      limit: 1
+    });
+
+    expect(results.length).toBe(1);
+    expect(results[0].memory.content).toContain('sistem pertahanan');
+    expect(results[0].score).toBeDefined(); // RRF score should be set
+  });
+
+  it('should ingest documents using Parent-Child hierarchy and resolve parent context on query', async () => {
+    const parentText = 'Ini adalah paragraf panjang tentang Budi yang bertindak sebagai Parent.';
+    const buffer = Buffer.from(parentText, 'utf-8');
+
+    const chunkIds = await memory.addDocument({
+      pathOrBuffer: buffer,
+      type: 'txt',
+      parentChild: true,
+      parentChunkSize: 60,
+      parentChunkOverlap: 10,
+      chunkSize: 20,
+      chunkOverlap: 5,
+      metadata: { hierarchy: 'parent-child-test' }
+    });
+
+    // It should generate multiple child chunks
+    expect(chunkIds.length).toBeGreaterThan(1);
+    expect(chunkIds[0]).toContain('-child-');
+
+    // Query for a child chunk using 'Budi' (mapped to mock vector [1, 0, 0])
+    const results = await memory.query({
+      query: 'Budi',
+      limit: 1,
+      filter: { hierarchy: 'parent-child-test' }
+    });
+
+    expect(results.length).toBe(1);
+    // The returned content should be the PARENT chunk text containing Budi
+    expect(results[0].memory.content).toContain('paragraf panjang');
+    expect(results[0].memory.metadata._parentId).toBeDefined();
+    expect(results[0].memory.metadata._childContent).toBeDefined();
+  });
 });
