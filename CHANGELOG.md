@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file. The format 
 
 ---
 
+## [1.2.0] - 2026-07-11
+
+### Added
+*   **Time-Decay Recency Weighting**:
+    *   Factored age decay rate (`decayFactor` per hour) into similarity distance calculations in `RMemory.query()` to prioritize recent facts over old information.
+*   **Batch Embedding & Ingestion Parallelism**:
+    *   Added `embedTexts()` method to generate embeddings for arrays of strings simultaneously.
+    *   Accelerated document chunk ingestion by batching calculations in local ONNX runtime and OpenAI payload requests.
+*   **Semantic Cache System**:
+    *   Created `cache_memories` and `vec_cache_memories` SQLite tables supporting vector searches with customizable distance threshold matching.
+    *   Added cache TTL limits and automated trigger cleanup routines.
+*   **Memory Consolidation & Clustering**:
+    *   Implemented hierarchical neighbor clustering using cosine similarity metrics.
+    *   Added a clustering consolidator (`RMemory.consolidate()`) that merges overlapping thoughts using developer-provided summarizer LLM callbacks and deletes source redundant entries.
+
 ## [1.1.0] - 2026-07-11
 
 ### Added
