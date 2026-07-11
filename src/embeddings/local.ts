@@ -52,6 +52,33 @@ export class LocalTextEmbeddingProvider implements EmbeddingProvider {
     return Array.from(output.data);
   }
 
+  async embedTexts(texts: string[], context: 'query' | 'passage' = 'passage'): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const extractor = await this.getExtractor();
+
+    // E5 models require a prefix
+    const processedTexts = this.modelName.includes('e5-small')
+      ? texts.map(t => `${context}: ${t}`)
+      : texts;
+
+    const output = await extractor(processedTexts, {
+      pooling: 'mean',
+      normalize: true
+    });
+
+    const dims = this.dimensions;
+    const data = output.data; // Float32Array containing all embeddings in a flat array
+    const results: number[][] = [];
+    
+    for (let i = 0; i < texts.length; i++) {
+      const start = i * dims;
+      const end = start + dims;
+      results.push(Array.from(data.subarray(start, end)));
+    }
+    
+    return results;
+  }
+
   async embedImage(image: string | Buffer | Uint8Array): Promise<number[]> {
     throw new Error('LocalTextEmbeddingProvider does not support image embeddings. Use LocalCLIPEmbeddingProvider for multimodal memories.');
   }
@@ -104,6 +131,27 @@ export class LocalCLIPEmbeddingProvider implements EmbeddingProvider {
     // Normalize CLIP embedding to unit length
     const rawData = Array.from(text_embeds.data) as number[];
     return this.normalize(rawData);
+  }
+
+  async embedTexts(texts: string[], context?: 'query' | 'passage'): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    await this.initTextModel();
+    
+    const textInputs = this.tokenizer(texts, { padding: true, truncation: true });
+    const { text_embeds } = await this.textModel(textInputs);
+    
+    const dims = this.dimensions;
+    const data = text_embeds.data; // Float32Array containing all embeddings
+    const results: number[][] = [];
+    
+    for (let i = 0; i < texts.length; i++) {
+      const start = i * dims;
+      const end = start + dims;
+      const rawVector = Array.from(data.subarray(start, end)) as number[];
+      results.push(this.normalize(rawVector));
+    }
+    
+    return results;
   }
 
   async embedImage(imageInput: string | Buffer | Uint8Array): Promise<number[]> {

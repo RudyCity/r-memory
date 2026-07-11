@@ -72,6 +72,56 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     return embedding;
   }
 
+  async embedTexts(texts: string[], context?: 'query' | 'passage'): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const url = `${this.baseURL.replace(/\/$/, '')}/embeddings`;
+    
+    const body: Record<string, any> = {
+      input: texts,
+      model: this.model
+    };
+
+    if (this.sendDimensionsParam && this.dimensions !== 1536 && this.model.includes('text-embedding-3')) {
+      body.dimensions = this.dimensions;
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    };
+
+    if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenAI API Error (${response.status}): ${errorText}`);
+    }
+
+    const resJson = (await response.json()) as any;
+    if (!resJson.data || resJson.data.length !== texts.length) {
+      throw new Error(`Invalid response format from OpenAI embeddings API: ${JSON.stringify(resJson)}`);
+    }
+
+    // Sort responses by original index to ensure correct ordering (OpenAI returns index field)
+    const sortedData = [...resJson.data].sort((a, b) => a.index - b.index);
+    
+    return sortedData.map(item => {
+      let embedding = item.embedding as number[];
+      if (embedding.length !== this.dimensions) {
+        embedding = embedding.slice(0, this.dimensions);
+        embedding = this.normalize(embedding);
+      }
+      return embedding;
+    });
+  }
+
   async embedImage(image: string | Buffer | Uint8Array): Promise<number[]> {
     throw new Error('OpenAIEmbeddingProvider does not support image embeddings natively. Please use LocalCLIPEmbeddingProvider or a custom multimodal provider for image data.');
   }

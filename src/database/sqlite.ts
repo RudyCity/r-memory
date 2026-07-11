@@ -8,12 +8,16 @@ export class SQLiteAdapter implements DatabaseAdapter {
   private tableName: string;
   private vecTableName: string;
   private ftsTableName: string;
+  private cacheTableName: string;
+  private vecCacheTableName: string;
   private dimensions: number;
 
   constructor(dbPath: string, collectionName = 'memories', dimensions: number) {
     this.tableName = `memories_${collectionName}`;
     this.vecTableName = `vec_memories_${collectionName}`;
     this.ftsTableName = `fts_${collectionName}`;
+    this.cacheTableName = `cache_memories_${collectionName}`;
+    this.vecCacheTableName = `vec_cache_memories_${collectionName}`;
     this.dimensions = dimensions;
     
     // Initialize database connection
@@ -54,10 +58,25 @@ export class SQLiteAdapter implements DatabaseAdapter {
       `);
 
       // sqlite-vec virtual table
-      // Note: we use float[dimensions] as expected by sqlite-vec
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS ${this.vecTableName} USING vec0(
           rowid INTEGER PRIMARY KEY, -- Maps directly to rowid in the metadata table
+          embedding float[${this.dimensions}]
+        );
+      `);
+
+      // Semantic Cache Tables (Vector Mode)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ${this.cacheTableName} (
+          rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+          query_text TEXT UNIQUE NOT NULL,
+          response_text TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          ttl_seconds INTEGER NOT NULL
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS ${this.vecCacheTableName} USING vec0(
+          rowid INTEGER PRIMARY KEY,
           embedding float[${this.dimensions}]
         );
       `);
@@ -76,6 +95,18 @@ export class SQLiteAdapter implements DatabaseAdapter {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_${this.tableName}_id ON ${this.tableName}(id);
       `);
 
+      // Semantic Cache Table (Fallback Mode)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS ${this.cacheTableName} (
+          rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+          query_text TEXT UNIQUE NOT NULL,
+          response_text TEXT NOT NULL,
+          embedding BLOB NOT NULL, -- Serialized Float32Array
+          created_at INTEGER NOT NULL,
+          ttl_seconds INTEGER NOT NULL
+        );
+      `);
+
       // Register the cosine similarity function
       this.db.function('vec_distance_cosine', (a: unknown, b: unknown) => {
         if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
@@ -92,12 +123,11 @@ export class SQLiteAdapter implements DatabaseAdapter {
           dotProduct += arrA[i] * arrB[i];
         }
         
-        // Since embeddings are pre-normalized, cosine distance is 1.0 - dot product
         return 1.0 - dotProduct;
       });
     }
 
-    // Initialize FTS5 Virtual Table for Lexical Search (in BOTH vector and fallback modes)
+    // Initialize FTS5 Virtual Table for Lexical Search
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS ${this.ftsTableName} USING fts5(
         content,
@@ -122,8 +152,7 @@ export class SQLiteAdapter implements DatabaseAdapter {
       END;
     `);
 
-    // Auto-create index on metadata fields if common fields are present
-    // This accelerates json_extract queries
+    // Auto-create index on metadata fields
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_${this.tableName}_meta_docid ON ${this.tableName}(json_extract(metadata, '$._documentId'));
       CREATE INDEX IF NOT EXISTS idx_${this.tableName}_meta_session ON ${this.tableName}(json_extract(metadata, '$.session'));
@@ -131,14 +160,12 @@ export class SQLiteAdapter implements DatabaseAdapter {
   }
 
   insert(id: string, content: string, embedding: number[], metadata: Record<string, any>): void {
-    // Convert embedding to Float32Array buffer for binary BLOB storage
     const floatArray = new Float32Array(embedding);
     const buffer = Buffer.from(floatArray.buffer, floatArray.byteOffset, floatArray.byteLength);
     const metadataStr = JSON.stringify(metadata);
     const createdAt = Date.now();
 
     if (this.isVectorExtensionLoaded) {
-      // Use SQLite transactions for safe compound inserts
       const insertMeta = this.db.prepare(`
         INSERT INTO ${this.tableName} (id, content, metadata, created_at)
         VALUES (?, ?, ?, ?)
@@ -154,12 +181,9 @@ export class SQLiteAdapter implements DatabaseAdapter {
       `);
 
       const runTx = this.db.transaction(() => {
-        // First delete if conflicts exist in virtual table
-        // As INSERT OR REPLACE is buggy in sqlite-vec, we fetch rowid first
         const existing = this.db.prepare(`SELECT rowid FROM ${this.tableName} WHERE id = ?`).get(id) as any;
         if (existing) {
           this.db.prepare(`DELETE FROM ${this.vecTableName} WHERE rowid = ?`).run(BigInt(existing.rowid));
-          // Note: FTS triggers handle synchronization for updates/deletes in memories table
         }
 
         const info = insertMeta.run(id, content, metadataStr, createdAt);
@@ -170,7 +194,6 @@ export class SQLiteAdapter implements DatabaseAdapter {
 
       runTx();
     } else {
-      // Fallback Mode insert
       const stmt = this.db.prepare(`
         INSERT INTO ${this.tableName} (id, content, metadata, embedding, created_at)
         VALUES (?, ?, ?, ?, ?)
@@ -188,7 +211,6 @@ export class SQLiteAdapter implements DatabaseAdapter {
     const floatArray = new Float32Array(queryEmbedding);
     const buffer = Buffer.from(floatArray.buffer, floatArray.byteOffset, floatArray.byteLength);
     
-    // Build query where clause from filter metadata
     const whereClauses: string[] = [];
     const params: any[] = [];
 
@@ -200,8 +222,6 @@ export class SQLiteAdapter implements DatabaseAdapter {
     }
 
     if (this.isVectorExtensionLoaded) {
-      // Vector Mode Query
-      // We MATCH query embedding first, then join with metadata table
       let sql = `
         SELECT 
           m.id, 
@@ -234,7 +254,6 @@ export class SQLiteAdapter implements DatabaseAdapter {
         distance: row.distance
       }));
     } else {
-      // Fallback Mode Query
       let sql = `
         SELECT 
           id, 
@@ -282,7 +301,6 @@ export class SQLiteAdapter implements DatabaseAdapter {
       }
     }
 
-    // Lexical Search using FTS5 MATCH
     let sql = `
       SELECT 
         m.id, 
@@ -302,7 +320,6 @@ export class SQLiteAdapter implements DatabaseAdapter {
       queryParams.push(...params);
     }
 
-    // bm25 score (smaller/more negative is better)
     sql += ` ORDER BY score ASC LIMIT ?`;
     queryParams.push(limit);
 
@@ -317,26 +334,81 @@ export class SQLiteAdapter implements DatabaseAdapter {
           metadata: JSON.parse(row.metadata),
           createdAt: row.created_at
         },
-        // Normalize: BM25 score could be anything, but distance is lower is better
-        // For RRF rank fusion, only ordering matters, so we return the raw score
         distance: row.score
       }));
     } catch (e: any) {
-      // If FTS query fails (e.g. syntax issue in MATCH), return empty
       return [];
     }
   }
 
   getById(id: string): Memory | null {
-    const stmt = this.db.prepare(`SELECT id, content, metadata, created_at FROM ${this.tableName} WHERE id = ?`);
-    const row = stmt.get(id) as any;
-    if (!row) return null;
-    return {
+    if (this.isVectorExtensionLoaded) {
+      const stmt = this.db.prepare(`SELECT rowid, id, content, metadata, created_at FROM ${this.tableName} WHERE id = ?`);
+      const row = stmt.get(id) as any;
+      if (!row) return null;
+      
+      let embedding: number[] | undefined;
+      try {
+        const vecRow = this.db.prepare(`SELECT embedding FROM ${this.vecTableName} WHERE rowid = ?`).get(BigInt(row.rowid)) as any;
+        if (vecRow && vecRow.embedding) {
+          const arr = new Float32Array(vecRow.embedding.buffer, vecRow.embedding.byteOffset, vecRow.embedding.byteLength / 4);
+          embedding = Array.from(arr);
+        }
+      } catch (e) {}
+
+      return {
+        id: row.id,
+        content: row.content,
+        metadata: JSON.parse(row.metadata),
+        createdAt: row.created_at,
+        embedding
+      };
+    } else {
+      const stmt = this.db.prepare(`SELECT id, content, metadata, embedding, created_at FROM ${this.tableName} WHERE id = ?`);
+      const row = stmt.get(id) as any;
+      if (!row) return null;
+      
+      let embedding: number[] | undefined;
+      if (row.embedding) {
+        const arr = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+        embedding = Array.from(arr);
+      }
+
+      return {
+        id: row.id,
+        content: row.content,
+        metadata: JSON.parse(row.metadata),
+        createdAt: row.created_at,
+        embedding
+      };
+    }
+  }
+
+  getAll(filter?: Record<string, any>): Memory[] {
+    const whereClauses: string[] = [];
+    const params: any[] = [];
+
+    if (filter) {
+      for (const [key, value] of Object.entries(filter)) {
+        whereClauses.push(`json_extract(metadata, '$.${key}') = ?`);
+        params.push(value);
+      }
+    }
+
+    let sql = `SELECT id, content, metadata, created_at FROM ${this.tableName}`;
+    if (whereClauses.length > 0) {
+      sql += ` WHERE ${whereClauses.join(' AND ')}`;
+    }
+
+    const stmt = this.db.prepare(sql);
+    const rows = stmt.all(...params) as any[];
+
+    return rows.map(row => ({
       id: row.id,
       content: row.content,
       metadata: JSON.parse(row.metadata),
       createdAt: row.created_at
-    };
+    }));
   }
 
   delete(id: string): void {
@@ -359,18 +431,124 @@ export class SQLiteAdapter implements DatabaseAdapter {
     }
   }
 
+  // Semantic Cache Implementation
+  setCache(queryText: string, responseText: string, embedding: number[], ttlSeconds: number): void {
+    const floatArray = new Float32Array(embedding);
+    const buffer = Buffer.from(floatArray.buffer, floatArray.byteOffset, floatArray.byteLength);
+    const createdAt = Math.floor(Date.now() / 1000);
+
+    if (this.isVectorExtensionLoaded) {
+      const insertMeta = this.db.prepare(`
+        INSERT INTO ${this.cacheTableName} (query_text, response_text, created_at, ttl_seconds)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(query_text) DO UPDATE SET
+          response_text = excluded.response_text,
+          created_at = excluded.created_at,
+          ttl_seconds = excluded.ttl_seconds
+      `);
+      
+      const insertVec = this.db.prepare(`
+        INSERT OR REPLACE INTO ${this.vecCacheTableName} (rowid, embedding)
+        VALUES (?, ?)
+      `);
+
+      const runTx = this.db.transaction(() => {
+        const existing = this.db.prepare(`SELECT rowid FROM ${this.cacheTableName} WHERE query_text = ?`).get(queryText) as any;
+        if (existing) {
+          this.db.prepare(`DELETE FROM ${this.vecCacheTableName} WHERE rowid = ?`).run(BigInt(existing.rowid));
+        }
+
+        const info = insertMeta.run(queryText, responseText, createdAt, ttlSeconds);
+        insertVec.run(BigInt(info.lastInsertRowid), buffer);
+      });
+      runTx();
+    } else {
+      const stmt = this.db.prepare(`
+        INSERT INTO ${this.cacheTableName} (query_text, response_text, embedding, created_at, ttl_seconds)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(query_text) DO UPDATE SET
+          response_text = excluded.response_text,
+          embedding = excluded.embedding,
+          created_at = excluded.created_at,
+          ttl_seconds = excluded.ttl_seconds
+      `);
+      stmt.run(queryText, responseText, buffer, createdAt, ttlSeconds);
+    }
+  }
+
+  getCache(queryEmbedding: number[], threshold: number): string | null {
+    const floatArray = new Float32Array(queryEmbedding);
+    const buffer = Buffer.from(floatArray.buffer, floatArray.byteOffset, floatArray.byteLength);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (this.isVectorExtensionLoaded) {
+      const stmt = this.db.prepare(`
+        SELECT 
+          c.response_text,
+          c.created_at,
+          c.ttl_seconds,
+          v.distance
+        FROM ${this.vecCacheTableName} v
+        JOIN ${this.cacheTableName} c ON c.rowid = v.rowid
+        WHERE v.embedding MATCH ? AND k = 1
+      `);
+      
+      try {
+        const row = stmt.get(buffer) as any;
+        if (row && row.distance <= threshold && (row.created_at + row.ttl_seconds > now)) {
+          return row.response_text;
+        }
+      } catch (e) {}
+      return null;
+    } else {
+      const stmt = this.db.prepare(`
+        SELECT 
+          response_text,
+          created_at,
+          ttl_seconds,
+          vec_distance_cosine(embedding, ?) as distance
+        FROM ${this.cacheTableName}
+        WHERE (created_at + ttl_seconds > ?)
+        ORDER BY distance ASC
+        LIMIT 1
+      `);
+      
+      try {
+        const row = stmt.get(buffer, now) as any;
+        if (row && row.distance <= threshold) {
+          return row.response_text;
+        }
+      } catch (e) {}
+      return null;
+    }
+  }
+
+  clearCache(): void {
+    const runTx = this.db.transaction(() => {
+      if (this.isVectorExtensionLoaded) {
+        this.db.exec(`DELETE FROM ${this.vecCacheTableName}`);
+      }
+      this.db.exec(`DELETE FROM ${this.cacheTableName}`);
+    });
+    runTx();
+  }
+
   clear(): void {
     const runTx = this.db.transaction(() => {
-      // 1. Delete from memories table (triggers will automatically delete from FTS5!)
+      // 1. Delete memories (triggers FTS sync)
       this.db.exec(`DELETE FROM ${this.tableName}`);
       
-      // 2. If vector mode, delete from vector table
+      // 2. Clear vectors
       if (this.isVectorExtensionLoaded) {
         this.db.exec(`DELETE FROM ${this.vecTableName}`);
       }
       
-      // 3. Reset autoincrement sequence
+      // 3. Clear cache
+      this.clearCache();
+      
+      // 4. Reset sequences
       this.db.exec(`DELETE FROM sqlite_sequence WHERE name='${this.tableName}'`);
+      this.db.exec(`DELETE FROM sqlite_sequence WHERE name='${this.cacheTableName}'`);
     });
     runTx();
   }

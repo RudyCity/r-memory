@@ -10,7 +10,8 @@
     "test": "vitest run",
     "example": "ts-node --esm examples/test-memory.ts",
     "example:document": "ts-node --esm examples/test-document.ts",
-    "example:advanced": "ts-node --esm examples/test-advanced.ts"
+    "example:advanced": "ts-node --esm examples/test-advanced.ts",
+    "example:ultimate": "ts-node --esm examples/test-ultimate.ts"
   },
   "keywords": [
     "memory",

@@ -7,7 +7,8 @@ import {
   EmbeddingProvider, 
   RMemoryConfig, 
   QueryOptions,
-  DocumentIngestOptions
+  DocumentIngestOptions,
+  ConsolidateOptions
 } from './types.js';
 import { 
   extractTextFromPDF, 
@@ -23,7 +24,8 @@ export {
   EmbeddingProvider, 
   RMemoryConfig, 
   QueryOptions,
-  DocumentIngestOptions
+  DocumentIngestOptions,
+  ConsolidateOptions
 };
 
 export { 
@@ -95,10 +97,10 @@ export class RMemory {
 
   /**
    * Queries memories based on semantic similarity, support for lexical query, and hybrid search.
-   * Resolves parent-child references dynamically to return parent context during retrieval.
+   * Resolves parent-child references dynamically and applies optional time-decay recency weights.
    * 
    * @param options Query configuration options
-   * @returns Array of query results containing memory details and similarity distance
+   * @returns Array of query results containing memory details and similarity score
    */
   async query(options: QueryOptions): Promise<QueryResult[]> {
     const limit = options.limit ?? 5;
@@ -118,7 +120,27 @@ export class RMemory {
       rawResults = this.db.query(queryEmbedding, limit, filter);
     }
 
-    // 2. Resolve Parent-Child References
+    // 2. Apply optional Time Decay (Recency Weighting)
+    if (options.decayFactor !== undefined && options.decayFactor > 0) {
+      const now = Date.now();
+      rawResults.forEach(res => {
+        // Compute age in hours
+        const ageHours = (now - res.memory.createdAt) / (1000 * 60 * 60);
+        const decayMultiplier = Math.exp(-options.decayFactor! * ageHours);
+        
+        // Decay similarity score (where similarity is 1.0 - distance)
+        const similarity = 1.0 - res.distance;
+        const decayedSimilarity = similarity * decayMultiplier;
+        
+        // Convert back to cosine distance
+        res.distance = 1.0 - decayedSimilarity;
+      });
+
+      // Sort by decayed distance ascending (closer matches first)
+      rawResults.sort((a, b) => a.distance - b.distance);
+    }
+
+    // 3. Resolve Parent-Child References
     // Swap child chunk content with parent content if _parentId is present in metadata
     const resolvedResults: QueryResult[] = [];
     for (const res of rawResults) {
@@ -143,7 +165,7 @@ export class RMemory {
       resolvedResults.push(res);
     }
 
-    return resolvedResults;
+    return resolvedResults.slice(0, limit);
   }
 
   /**
@@ -151,17 +173,13 @@ export class RMemory {
    * merged using Reciprocal Rank Fusion (RRF).
    */
   private async queryHybrid(queryText: string, limit: number, filter?: Record<string, any>): Promise<QueryResult[]> {
-    // Retrieve double the limit for more robust ranking merging
     const candidateLimit = limit * 2;
 
-    // A. Run Semantic Vector Search
     const queryEmbedding = await this.provider.embedText(queryText, 'query');
     const semanticResults = this.db.query(queryEmbedding, candidateLimit, filter);
 
-    // B. Run Lexical Keyword Search
     const lexicalResults = this.db.queryLexical(queryText, candidateLimit, filter);
 
-    // C. Combine using Reciprocal Rank Fusion (RRF)
     const rrfScores: Record<string, { memory: Memory; semanticRank?: number; lexicalRank?: number; distance: number }> = {};
 
     semanticResults.forEach((res, index) => {
@@ -175,13 +193,12 @@ export class RMemory {
     lexicalResults.forEach((res, index) => {
       const id = res.memory.id;
       if (!rrfScores[id]) {
-        // Fallback distance to 1.0 (opposite/unmatched) if not found in semantic results
         rrfScores[id] = { memory: res.memory, distance: 1.0 };
       }
       rrfScores[id].lexicalRank = index + 1;
     });
 
-    const k = 60; // Standard constants for RRF fusion
+    const k = 60; 
     const combined: QueryResult[] = [];
 
     for (const [id, info] of Object.entries(rrfScores)) {
@@ -200,15 +217,14 @@ export class RMemory {
       });
     }
 
-    // Sort by RRF score descending (higher is better)
     combined.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 
-    return combined.slice(0, limit);
+    return combined;
   }
 
   /**
-   * Extracts text, chunks it, and adds a whole document (PDF, DOCX, XLSX, TXT) to the memory collection.
-   * Supports both sliding window chunking and Parent-Child hierarchical ingestion.
+   * Extracts text, chunks it, and adds a whole document to the database.
+   * Performs parallel batch embedding generation to accelerate ingestion speed.
    * 
    * @param options Document ingestion configuration
    * @returns Array of generated memory IDs for each chunk
@@ -217,7 +233,7 @@ export class RMemory {
     const docId = options.id || randomUUID();
     const customMetadata = options.metadata || {};
     const chunkSize = options.chunkSize ?? 500;
-    const chunkOverlap = options.chunkOverlap ?? 100;
+    const chunkOverlap = options.chunkOverlap ?? Math.min(100, Math.floor(chunkSize * 0.2));
 
     let buffer: Buffer;
     if (typeof options.pathOrBuffer === 'string') {
@@ -248,7 +264,7 @@ export class RMemory {
 
     if (options.parentChild) {
       const parentChunkSize = options.parentChunkSize ?? 1000;
-      const parentChunkOverlap = options.parentChunkOverlap ?? 200;
+      const parentChunkOverlap = options.parentChunkOverlap ?? Math.min(200, Math.floor(parentChunkSize * 0.2));
 
       const parentChildData = chunkTextParentChild(
         text, 
@@ -258,11 +274,18 @@ export class RMemory {
         chunkOverlap
       );
 
+      // Collect all child texts across parents to generate batch embeddings in one call
+      const allChildTexts: string[] = [];
+      parentChildData.forEach(p => allChildTexts.push(...p.childChunks));
+      
+      const allChildEmbeddings = await this.provider.embedTexts(allChildTexts, 'passage');
+
+      let childEmbedIndex = 0;
       for (let pIdx = 0; pIdx < parentChildData.length; pIdx++) {
         const parentId = `${docId}-parent-${pIdx}`;
         const parentText = parentChildData[pIdx].parentText;
 
-        // Store parent chunk without embedding (save resource: fill vector table with dummy zeros)
+        // Store parent chunk without embedding (saves space)
         const dummyEmbedding = new Array(this.provider.dimensions).fill(0);
         await this.addMemory({
           id: parentId,
@@ -271,7 +294,7 @@ export class RMemory {
           embedding: dummyEmbedding
         });
 
-        // Store child chunks with their generated embeddings
+        // Store child chunks with pre-computed batch embeddings
         const childTexts = parentChildData[pIdx].childChunks;
         for (let cIdx = 0; cIdx < childTexts.length; cIdx++) {
           const childId = `${docId}-child-${pIdx}-${cIdx}`;
@@ -284,14 +307,17 @@ export class RMemory {
           await this.addMemory({
             id: childId,
             content: childTexts[cIdx],
-            metadata: childMetadata
+            metadata: childMetadata,
+            embedding: allChildEmbeddings[childEmbedIndex++]
           });
           chunkIds.push(childId);
         }
       }
     } else {
-      // Standard Flat Chunking Ingestion
+      // Flat Ingestion with Batch Embedding
       const chunks = chunkText(text, chunkSize, chunkOverlap);
+      const embeddings = await this.provider.embedTexts(chunks, 'passage');
+
       for (let i = 0; i < chunks.length; i++) {
         const chunkId = `${docId}-chunk-${i}`;
         const chunkMetadata = {
@@ -304,13 +330,109 @@ export class RMemory {
         await this.addMemory({
           id: chunkId,
           content: chunks[i],
-          metadata: chunkMetadata
+          metadata: chunkMetadata,
+          embedding: embeddings[i]
         });
         chunkIds.push(chunkId);
       }
     }
 
     return chunkIds;
+  }
+
+  /**
+   * Retrieves a cached LLM response for a query based on semantic similarity.
+   */
+  async getSemanticCache(queryText: string, threshold = 0.05): Promise<string | null> {
+    const queryEmbedding = await this.provider.embedText(queryText, 'query');
+    return this.db.getCache(queryEmbedding, threshold);
+  }
+
+  /**
+   * Caches an LLM response for a query.
+   */
+  async setSemanticCache(queryText: string, responseText: string, ttlSeconds = 3600): Promise<void> {
+    const queryEmbedding = await this.provider.embedText(queryText, 'query');
+    this.db.setCache(queryText, responseText, queryEmbedding, ttlSeconds);
+  }
+
+  /**
+   * Clears the semantic cache.
+   */
+  clearCache(): void {
+    this.db.clearCache();
+  }
+
+  /**
+   * Consolidates older, highly similar memories by clustering them and merging
+   * using a developer-provided summarizer LLM callback.
+   */
+  async consolidate(
+    summarizer: (texts: string[]) => Promise<string>,
+    options: ConsolidateOptions = {}
+  ): Promise<void> {
+    const threshold = options.threshold ?? 0.15;
+    const filter = options.filter;
+
+    // Retrieve all memories in the collection (without vector query)
+    const allMemories = this.db.getAll(filter);
+
+    if (allMemories.length <= 1) return;
+
+    const visited = new Set<string>();
+
+    for (let i = 0; i < allMemories.length; i++) {
+      const current = allMemories[i];
+      if (visited.has(current.id)) continue;
+      if (current.metadata._isParent) continue;
+
+      // Load full memory record containing its embedding float array
+      const fullCurrent = this.db.getById(current.id);
+      if (!fullCurrent || !fullCurrent.embedding) continue;
+
+      // Query database for nearest neighbors of current memory
+      const matches = this.db.query(fullCurrent.embedding, 30, filter);
+      const cluster: Memory[] = [];
+
+      for (const match of matches) {
+        if (visited.has(match.memory.id)) continue;
+        if (match.memory.metadata._isParent) continue;
+
+        if (match.distance <= threshold) {
+          cluster.push(match.memory);
+        }
+      }
+
+      // Summarize and consolidate if there's overlap (> 1 similar memory)
+      if (cluster.length > 1) {
+        const clusterTexts = cluster.map(m => m.content);
+        
+        try {
+          const summary = await summarizer(clusterTexts);
+          
+          // Delete merged child memories
+          const clusterIds = cluster.map(m => m.id);
+          clusterIds.forEach(id => {
+            visited.add(id);
+            this.db.delete(id);
+          });
+
+          // Insert summarized memory back
+          const consolidatedMetadata = {
+            _isConsolidated: true,
+            _consolidatedCount: cluster.length,
+            _sourceIds: clusterIds
+          };
+
+          await this.addMemory({
+            content: summary,
+            metadata: consolidatedMetadata
+          });
+        } catch (e) {
+          console.error('Error consolidating cluster:', e);
+        }
+      }
+    }
   }
 
   /**
