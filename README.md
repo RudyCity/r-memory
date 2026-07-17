@@ -39,13 +39,13 @@ A high-performance, light-weight TypeScript memory agent library. It equips AI a
 
 ## 📦 Installation
 
-Install the package and its peer dependencies:
+Install the package and its peer dependencies using Bun:
 
 ```bash
-npm install r-memory better-sqlite3 sqlite-vec @huggingface/transformers sharp pdf-parse mammoth xlsx
+bun add r-memory better-sqlite3 sqlite-vec @huggingface/transformers sharp pdf-parse mammoth xlsx
 ```
 
-> **Note**: `sharp` is required for local image decoding. `pdf-parse`, `mammoth`, and `xlsx` are required only if you use the document ingestion feature.
+> **Note**: `bun:sqlite` is automatically used as the database engine under the Bun runtime. Native vector capabilities are enabled by loading the `sqlite-vec` extension via `loadExtension()`. Under Node.js, `better-sqlite3` is used instead. `sharp` is required for local image decoding. `pdf-parse`, `mammoth`, and `xlsx` are required only if you use the document ingestion feature.
 
 ---
 

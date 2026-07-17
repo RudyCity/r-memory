@@ -1,4 +1,4 @@
-import { EmbeddingProvider } from '../types.js';
+import type { EmbeddingProvider } from '../types.js';
 
 export interface OpenAIEmbeddingConfig {
   baseURL?: string;

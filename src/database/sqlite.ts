@@ -14,6 +14,12 @@ if (typeof Bun !== 'undefined') {
     pragma(sql: string) {
       this.db.run(`PRAGMA ${sql}`);
     }
+    loadExtension(path: string) {
+      this.db.loadExtension(path);
+    }
+    transaction(fn: (...args: any[]) => any) {
+      return this.db.transaction(fn);
+    }
     prepare(sql: string) {
       const query = this.db.query(sql);
       return {
@@ -29,13 +35,16 @@ if (typeof Bun !== 'undefined') {
         }
       };
     }
+    close() {
+      this.db.close();
+    }
   };
 } else {
   const { default: BetterSqlite3 } = await import("better-sqlite3");
   Database = BetterSqlite3;
 }
 import * as sqliteVec from 'sqlite-vec';
-import { Memory, QueryResult, DatabaseAdapter } from '../types.js';
+import type { Memory, QueryResult, DatabaseAdapter } from '../types.js';
 
 export class SQLiteAdapter implements DatabaseAdapter {
   private db: any;
@@ -67,7 +76,11 @@ export class SQLiteAdapter implements DatabaseAdapter {
   private initialize(): void {
     // Attempt to load sqlite-vec extension
     try {
-      sqliteVec.load(this.db);
+      if (typeof this.db.loadExtension === 'function') {
+        this.db.loadExtension(sqliteVec.getLoadablePath());
+      } else {
+        sqliteVec.load(this.db);
+      }
       // Verify it is working
       const version = this.db.prepare('SELECT vec_version()').get() as any;
       if (version) {
@@ -288,7 +301,7 @@ export class SQLiteAdapter implements DatabaseAdapter {
         },
         distance: row.distance
       }));
-    } else {
+    } else if (typeof this.db.function === 'function') {
       let sql = `
         SELECT 
           id, 
@@ -322,6 +335,59 @@ export class SQLiteAdapter implements DatabaseAdapter {
         },
         distance: row.distance
       }));
+    } else {
+      // JS-side fallback mode when db.function is not available (like bun:sqlite fallback)
+      let sql = `
+        SELECT 
+          id, 
+          content, 
+          metadata, 
+          created_at,
+          embedding
+        FROM ${this.tableName} m
+        WHERE 1=1
+      `;
+
+      const queryParams: any[] = [];
+
+      if (whereClauses.length > 0) {
+        sql += ` AND ${whereClauses.join(' AND ')}`;
+        queryParams.push(...params);
+      }
+
+      const stmt = this.db.prepare(sql);
+      const rows = stmt.all(...queryParams) as any[];
+
+      const computeDistance = (a: Float32Array, b: Float32Array) => {
+        let dotProduct = 0;
+        const len = Math.min(a.length, b.length);
+        for (let i = 0; i < len; i++) {
+          dotProduct += a[i] * b[i];
+        }
+        return 1.0 - dotProduct;
+      };
+
+      const queryArr = new Float32Array(queryEmbedding);
+
+      const results = rows.map(row => {
+        const rowBuf = Buffer.isBuffer(row.embedding) 
+          ? row.embedding 
+          : Buffer.from(row.embedding);
+        const arr = new Float32Array(rowBuf.buffer, rowBuf.byteOffset, rowBuf.byteLength / 4);
+        const dist = computeDistance(arr, queryArr);
+        return {
+          memory: {
+            id: row.id,
+            content: row.content,
+            metadata: JSON.parse(row.metadata),
+            createdAt: row.created_at
+          },
+          distance: dist
+        };
+      });
+
+      results.sort((a, b) => a.distance - b.distance);
+      return results.slice(0, limit);
     }
   }
 
@@ -535,7 +601,7 @@ export class SQLiteAdapter implements DatabaseAdapter {
         }
       } catch (e) {}
       return null;
-    } else {
+    } else if (typeof this.db.function === 'function') {
       const stmt = this.db.prepare(`
         SELECT 
           response_text,
@@ -552,6 +618,50 @@ export class SQLiteAdapter implements DatabaseAdapter {
         const row = stmt.get(buffer, now) as any;
         if (row && row.distance <= threshold) {
           return row.response_text;
+        }
+      } catch (e) {}
+      return null;
+    } else {
+      // JS-side fallback mode for cache (like bun:sqlite fallback)
+      const stmt = this.db.prepare(`
+        SELECT 
+          response_text,
+          created_at,
+          ttl_seconds,
+          embedding
+        FROM ${this.cacheTableName}
+        WHERE (created_at + ttl_seconds > ?)
+      `);
+      
+      try {
+        const rows = stmt.all(now) as any[];
+        const computeDistance = (a: Float32Array, b: Float32Array) => {
+          let dotProduct = 0;
+          const len = Math.min(a.length, b.length);
+          for (let i = 0; i < len; i++) {
+            dotProduct += a[i] * b[i];
+          }
+          return 1.0 - dotProduct;
+        };
+
+        const queryArr = new Float32Array(queryEmbedding);
+        let bestRow: any = null;
+        let minDistance = Infinity;
+
+        for (const row of rows) {
+          const rowBuf = Buffer.isBuffer(row.embedding) 
+            ? row.embedding 
+            : Buffer.from(row.embedding);
+          const arr = new Float32Array(rowBuf.buffer, rowBuf.byteOffset, rowBuf.byteLength / 4);
+          const dist = computeDistance(arr, queryArr);
+          if (dist < minDistance) {
+            minDistance = dist;
+            bestRow = row;
+          }
+        }
+
+        if (bestRow && minDistance <= threshold) {
+          return bestRow.response_text;
         }
       } catch (e) {}
       return null;

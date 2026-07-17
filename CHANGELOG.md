@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file. The format 
 
 ---
 
+## [1.3.0] - 2026-07-17
+
+### Added
+*   **Native Bun Support**:
+    *   Switched package runtime and tooling to use the Bun ecosystem.
+    *   Integrated native `bun:sqlite` database driver.
+    *   Supported loading native `sqlite-vec` binary extensions directly inside Bun using `db.loadExtension()`.
+    *   Added robust JavaScript-side cosine distance computation fallback when registering custom SQL functions isn't supported (specifically for standard SQLite fallbacks under Bun).
+    *   Updated type imports and exports to use type-only `import type` and `export type` syntax to ensure flawless transpilation and runtime behavior under Bun.
+    *   Changed package scripts to execute using `bun run` and `bun test`.
+
 ## [1.2.0] - 2026-07-11
 
 ### Added

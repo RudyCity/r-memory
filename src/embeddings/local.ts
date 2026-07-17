@@ -1,4 +1,4 @@
-import { EmbeddingProvider, LocalEmbeddingConfig } from '../types.js';
+import type { EmbeddingProvider, LocalEmbeddingConfig } from '../types.js';
 
 // Lazy load transformers.js to avoid loading it if only OpenAI-compatible is used
 let transformersModule: any = null;

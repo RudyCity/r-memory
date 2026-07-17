@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { SQLiteAdapter } from './database/sqlite.js';
-import { 
+import type { 
   Memory, 
   QueryResult, 
   EmbeddingProvider, 
@@ -18,7 +18,7 @@ import {
   chunkTextParentChild
 } from './utils/document.js';
 
-export { 
+export type { 
   Memory, 
   QueryResult, 
   EmbeddingProvider, 
@@ -33,10 +33,11 @@ export {
   LocalCLIPEmbeddingProvider 
 } from './embeddings/local.js';
 
-export { 
-  OpenAIEmbeddingProvider, 
-  OpenAIEmbeddingConfig 
-} from './embeddings/openai.js';
+import { OpenAIEmbeddingProvider } from './embeddings/openai.js';
+import type { OpenAIEmbeddingConfig } from './embeddings/openai.js';
+
+export { OpenAIEmbeddingProvider };
+export type { OpenAIEmbeddingConfig };
 
 export {
   extractTextFromPDF,

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { RMemory } from '../src/index.js';
-import { EmbeddingProvider } from '../src/types.js';
+import type { EmbeddingProvider } from '../src/types.js';
 import { existsSync, unlinkSync } from 'node:fs';
 
 // A simple mock embedding provider with 3 dimensions
