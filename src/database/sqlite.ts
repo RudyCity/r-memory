@@ -1,9 +1,44 @@
-import Database from 'better-sqlite3';
+declare const Bun: any;
+let Database: any;
+if (typeof Bun !== 'undefined') {
+  // @ts-ignore
+  const { Database: BunDatabase } = await import("bun:sqlite");
+  Database = class BunDatabaseWrapper {
+    private db: any;
+    constructor(dbPath: string) {
+      this.db = new BunDatabase(dbPath, { create: true });
+    }
+    exec(sql: string) {
+      this.db.run(sql);
+    }
+    pragma(sql: string) {
+      this.db.run(`PRAGMA ${sql}`);
+    }
+    prepare(sql: string) {
+      const query = this.db.query(sql);
+      return {
+        get(...args: any[]) {
+          const res = query.get(...args);
+          return res === null ? undefined : res;
+        },
+        run(...args: any[]) {
+          return query.run(...args);
+        },
+        all(...args: any[]) {
+          return query.all(...args);
+        }
+      };
+    }
+  };
+} else {
+  const { default: BetterSqlite3 } = await import("better-sqlite3");
+  Database = BetterSqlite3;
+}
 import * as sqliteVec from 'sqlite-vec';
 import { Memory, QueryResult, DatabaseAdapter } from '../types.js';
 
 export class SQLiteAdapter implements DatabaseAdapter {
-  private db: Database.Database;
+  private db: any;
   private isVectorExtensionLoaded = false;
   private tableName: string;
   private vecTableName: string;
